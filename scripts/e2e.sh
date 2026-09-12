@@ -14,7 +14,7 @@ cd "$ROOT/client"
 [ -f .env ] || { echo "client/.env is missing: run scripts/devnet.sh, or copy .env.example and point it at a hosted devnet"; exit 2; }
 [ -f "$APP_WASM" ] || { echo "$APP_WASM is missing: run scripts/build.sh (or download the CI artifact)"; exit 2; }
 TOKEN="$(sed -n 's/^VELA_TOKEN=//p' .env | tr -d '\r')"
-[ -n "$TOKEN" ] || { echo "VELA_TOKEN is empty in client/.env: the payroll needs an allowlisted ERC-20 (scripts/devnet.sh deploys one locally; on a hosted devnet ask its operator)"; exit 2; }
+[ -n "$TOKEN" ] || { echo "VELA_TOKEN is empty in client/.env: the payroll needs an allowlisted ERC-20 (scripts/devnet.sh deploys one locally; on the public devnet copy VELA_TEST_TOKEN into VELA_TOKEN, or allow-token another)"; exit 2; }
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) APP_WASM="$(cygpath -w "$APP_WASM")" ;; esac
 
 run() { synsema run vela_client.syn -- "$@"; }

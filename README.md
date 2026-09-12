@@ -11,7 +11,7 @@ TEE and settles every result on-chain, and on the [vela-app](https://github.com/
 starter kit: the app is **one `.syn` file** with its tests, the module is built for you (locally or
 by CI), and the client — keys, deploy, funding, pay runs, payslips, withdrawals, on-chain claims,
 gasless meta-transactions for employees — is a Synsema program too. Verified end to end against
-Horizen's starter kit v0.2.0 (the real Executor and contracts), locally and on the shared devnet.
+Horizen's starter kit v0.2.0 (the real Executor and contracts), locally and on the public devnet.
 
 ## What you get
 
@@ -20,7 +20,8 @@ app/app.syn                  the payroll app: deploy · deposit · payrun · wit
 client/vela_client.syn       the client: everything the starter kit's does + fund · payrun · payslips · withdraw · pending · claim-for
 client/payroll.example.csv   the CSV shape: to,amount,memo (amounts in tokens, e.g. 1500.50)
 client/.env.example          addresses, URLs, keys and the payroll token the client reads
-scripts/build.sh             app/app.syn → build/app.wasm (the guest module Vela loads) + sha256
+scripts/build.sh             app/app.syn → build/app.wasm (the release's guest module with your program in its slot) + sha256
+scripts/embed.syn            puts a .syn into the app slot of a guest module — what build.sh runs; no compiler
 scripts/smoke.mjs            probe of the module under Node's WASI, the way the Executor drives it
 scripts/devnet.sh            Horizen's starter kit in Docker, the test token deployed and allowlisted, client/.env written
 scripts/erc20/               the test stablecoin (TST, 6 decimals, permit) and the forge script that deploys and allowlists it
@@ -54,13 +55,14 @@ auditor ───report (deanonymize) ──────────────
 
 ## Ten minutes
 
-You need the [`synsema` binary](https://synsema.org) (`npm i -g synsema`, or the install script) and,
-to build the module, Rust (`rustup`) — or push to GitHub and download `app.wasm` from the CI run.
-For the stack you need Docker, or a hosted devnet's URLs and token.
+You need the [`synsema` binary](https://synsema.org) (`npm i -g synsema`, or the install script). That is
+all: the module is the release's guest with your program in its slot — no compiler, a few seconds.
+For the stack you need Docker, or a token of your own on the public devnet
+(`synsema run vela_client.syn -- devnet`).
 
 ```sh
 synsema test app/app.syn                 # 1. the app, natively — the same code runs in the enclave
-sh scripts/build.sh                      # 2. build/app.wasm (first time ≈ 5 min: it compiles the interpreter)
+sh scripts/build.sh                      # 2. build/app.wasm: the release's guest + your program (the guest downloads once)
 node scripts/smoke.mjs build/app.wasm    #    Node 20 or 24+ (not 22)
 sh scripts/devnet.sh                     # 3. Vela in Docker + the test token; writes client/.env
 sh scripts/e2e.sh                        # 4. the whole cycle: deploy, fund, onboard, pay run, payslip, withdraw, claim
@@ -73,9 +75,10 @@ part of it and claims it on-chain. Then edit the CSV and run `payrun` again.
 
 The payroll token: Horizen's kit ships no ERC-20, so `scripts/devnet.sh` deploys one for you
 (`scripts/erc20/TestToken.sol`: TST, 6 decimals, with EIP-2612 `permit`, the whole supply to
-Anvil #0), allowlists it and writes it to `client/.env` as `VELA_TOKEN`. On a hosted devnet the
-operator gives you the address of an allowlisted token; on Synsema's shared devnet one is already
-there. In production it is the stablecoin your company pays in, once Vela allowlists it.
+Anvil #0), allowlists it and writes it to `client/.env` as `VELA_TOKEN`. On the public devnet one is
+already allowlisted (`VELA_TEST_TOKEN` among the lines `devnet` writes — copy it to `VELA_TOKEN`), and
+`allow-token <address>` allowlists any other with the admin key. In production it is the stablecoin your
+company pays in, once Vela allowlists it.
 
 ## The commands
 
@@ -128,7 +131,7 @@ who received their own row) can show the hash matches.
   new application id, a new ledger.
 - Deploying needs an account with `DEPLOYER_ROLE` (Anvil #0 on the kit); the token needs
   `TokenAllowlist.addAllowedToken`; the auditor needs `DefaultAuthority.addAllowedAuthority(appId, address)`
-  from the admin, per application.
+  from the admin, per application (`vela_client.syn -- allow-authority <appId> <address>`; on a devnet the admin key is Anvil #0).
 - A run takes at most 500 items and the enclave keeps the last 2 000 payslips in state; the
   encrypted payslip events on-chain are the permanent record.
 - Node 22 crashes intermittently inside V8 running this module; use Node 20 or 24+.

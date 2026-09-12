@@ -6,7 +6,7 @@
 
 name = "Private payroll on Vela"
 slug = "vela-payroll"
-version = "0.1.0"
+version = "0.1.1"
 kind = "worker"
 entry = "client/vela_client.syn"
 engine = "0.6"
