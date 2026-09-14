@@ -1,0 +1,273 @@
+-- web.syn — the payroll console: the employer runs private payroll on Vela from the browser, and
+-- each person's payslips are one page away. This is the recipe's entry on the Synsema platform
+-- (kind = web): the same client library the CLI uses, behind a few pages.
+--
+-- What it keeps (data/payroll.json, on the project's volume): the app id once deployed, the P-521
+-- pair it generated when none came from the environment, the people it onboarded with the keys it
+-- made for them (the shape of an HR portal that custodies keys; a person with their own wallet uses
+-- the CLI), and the runs. Every action is one request to the enclave: 30 to 60 seconds on a devnet.
+--
+--   synsema serve web.syn            (from the repository root; .env there = `vela_client.syn -- devnet`)
+intent: "payroll console: private payroll on Vela from the browser — fund, onboard, pay runs, payslips, payouts"
+
+require serve(8080)
+require net("localhost")
+require net("127.0.0.1")
+require net("devnet.synsema.app")
+require net("github.com")
+require net("objects.githubusercontent.com")
+require net("release-assets.githubusercontent.com")
+require env("VELA_*")
+require env("SYNSEMA_*")
+require secret("VELA_*")
+require sign("VELA_SECP_KEY")
+require sign("VELA_USER_KEY")
+require random
+require time
+require file("data")
+require file("data/*")
+require file.read("app/*")
+require file.read("pages/*")
+require reveal("ecdh_keypair.private")
+
+use "./client/vela_lib.syn" as v
+use "./scripts/embed_lib.syn" as slot
+
+let ETH be "0x0000000000000000000000000000000000000000"
+let PROCESS be 1
+let ASSOCIATE_KEY be 3
+let GUEST_TAG be env("SYNSEMA_GUEST_TAG", "v0.6.23")
+let STATE be "data/payroll.json"
+
+-- ---- state on the volume ----
+
+task load()
+    when file_exists(STATE)
+        give json_decode(read_file(STATE))
+    give {"app_id": "", "p521_key": "", "p521_pub": "", "employees": [], "runs": []}
+
+task save(s)
+    write_file(STATE, json_encode(s))
+
+-- the client's configuration, with the app id from the state when the environment has none
+task config(s)
+    let c be v.cfg()
+    when c["app_id"] == "" and s["app_id"] != ""
+        set c["app_id"] to s["app_id"]
+    give c
+
+-- ---- keys ----
+
+-- the P-521 pair: from the environment when it is there, else made once and kept in the state
+task p521_pair(s)
+    when env("VELA_P521_KEY", "") != ""
+        give {"key": v.p521_key(), "pub": v.p521_public()}
+    when s["p521_key"] == ""
+        let kp be ecdh_keypair("P-521")
+        set s["p521_key"] to decode(reveal(kp["private"]), "hex")
+        set s["p521_pub"] to decode(kp["public"], "hex")
+        save(s)
+    give {"key": v.p521_of(s["p521_key"]), "pub": v.hex_bytes(s["p521_pub"])}
+
+task employer()
+    give v.secp_key()
+
+task person_key(e)
+    give v.secp_of(e["key"], "VELA_USER_KEY")
+
+-- ---- helpers ----
+
+task field(m, key, default)
+    when m != nothing and contains(m, key) and m[key] != nothing and text(m[key]) != ""
+        give m[key]
+    give default
+
+task human(c, u)
+    give v.from_units(text(u), v.token_decimals(c))
+
+task encrypted(c, keys, plain)
+    give v.seal(v.derive_key(keys["key"], v.tee_public_key(c)), bytes(json_encode(plain)))
+
+-- the employer's latest event of a type (its balance travels in every one)
+task latest_event(c, keys, kinds)
+    each item in v.events_with(c, keys["key"], employer(), 12)
+        when contains(item, "event") and contains(item["event"], "type") and contains(kinds, item["event"]["type"])
+            give item["event"]
+    give nothing
+
+task find_employee(s, i)
+    let n be v.int_of(i)
+    when n < length(s["employees"])
+        give s["employees"][n]
+    give nothing
+
+-- a message that survives a query string: no percent, ampersand, hash or plus in it
+task qs(msg)
+    let m be replace_text(replace_text(replace_text(replace_text(replace_text(text(msg), "%", " pct"), "&", " and "), "#", " "), "?", " "), "+", " plus ")
+    give replace_text(trim(m), " ", "+")
+
+task back(ok, err)
+    when err != ""
+        give redirect("/?err=" + qs(err), 302)
+    give redirect("/?ok=" + qs(ok), 302)
+
+-- ---- the actions, each one request to the enclave ----
+
+task do_deploy(s)
+    let c be config(s)
+    let keys be p521_pair(s)
+    let guest be nothing
+    when file_exists("data/guest.wasm")
+        set guest to read_file_bytes("data/guest.wasm")
+    otherwise
+        set guest to slot.release_guest(GUEST_TAG)
+        write_file("data/guest.wasm", guest)
+    let wasm be slot.embed(guest, read_file("app/app.syn"), "app.syn")
+    let ids be v.deploy_bytes(c, wasm, {"employer": v.me(), "token": v.app_token(c)}, nothing)
+    v.wait_completed(c, ids["request_id"], true)
+    set s["app_id"] to text(ids["app_id"])
+    save(s)
+    set c["app_id"] to s["app_id"]
+    let id be v.submit(c, ASSOCIATE_KEY, v.register_payload_with(c, keys["key"], keys["pub"], employer()), ETH, 0)
+    v.wait_completed(c, id, false)
+    give "deployed as app " + s["app_id"] + " and registered the employer"
+
+task do_fund(s, amount)
+    let c be config(s)
+    let units be v.int_of(v.to_units(amount, v.token_decimals(c)))
+    let token be v.app_token(c)
+    v.approve(c, token, units)
+    let id be v.submit(c, PROCESS, bytes(""), token, units)
+    v.wait_completed(c, id, false)
+    give "funded " + amount
+
+task do_onboard(s, name)
+    let c be config(s)
+    let keys be p521_pair(s)
+    let key be decode(random_bytes(32), "hex")
+    let secret be v.secp_of(key, "VELA_USER_KEY")
+    let address be eth_address(secret)
+    let id be v.submit_for_with(c, secret, ASSOCIATE_KEY, v.register_payload_with(c, keys["key"], keys["pub"], secret), ETH, 0)
+    v.wait_completed(c, id, false)
+    set s["employees"] to append(s["employees"], {"name": name, "address": address, "key": key})
+    save(s)
+    give "onboarded " + name + " (" + address + "), registered through the facilitator: no ETH on their side"
+
+task do_payrun(s, f)
+    let c be config(s)
+    let keys be p521_pair(s)
+    let d be v.token_decimals(c)
+    let items be []
+    let i be 0
+    while i < length(s["employees"])
+        let amount be trim(text(field(f, "amount_" + text(i), "")))
+        when amount != "" and amount != "0"
+            set items to append(items, {"to": s["employees"][i]["address"], "amount": v.to_units(amount, d), "memo": text(field(f, "memo", ""))})
+        set i to i + 1
+    when length(items) == 0
+        raise("give at least one amount")
+    let period be text(field(f, "period", ""))
+    let id be v.submit(c, PROCESS, encrypted(c, keys, {"type": "payrun", "period": period, "items": items}), ETH, 0)
+    let row be v.wait_completed(c, id, false)
+    let summary be latest_event(c, keys, ["payrun"])
+    set s["runs"] to append(s["runs"], {"period": period, "count": length(items), "total": when summary == nothing then "" otherwise human(c, summary["total"]), "block": text(row["blockNumber"]), "request": id})
+    save(s)
+    give "pay run of " + text(length(items)) + " people done at block " + text(row["blockNumber"])
+
+-- a person's payout: a withdrawal signed by them (the facilitator submits) and the on-chain claim
+task do_payout(s, e, amount)
+    let c be config(s)
+    let keys be p521_pair(s)
+    let units be v.to_units(amount, v.token_decimals(c))
+    let id be v.submit_for_with(c, person_key(e), PROCESS, encrypted(c, keys, {"type": "withdraw", "amount": units}), ETH, 0)
+    v.wait_completed(c, id, false)
+    v.send_tx(c, v.need(c, "processor", "VELA_PROCESSOR"), 0, abi_encode("claim(address,address)", [v.app_token(c), e["address"]]))
+    give "paid " + amount + " out to " + e["name"] + "'s wallet"
+
+-- ---- the pages ----
+
+task overview(s, ok, err)
+    let c be config(s)
+    let d be {"ok": ok, "err": err, "host": v.need(c, "rpc", "VELA_RPC_URL"), "employer": "", "eth": "", "token": v.app_token(c), "token_balance": "", "app_id": s["app_id"], "deployed": s["app_id"] != "",
+              "balance": "", "employees": [], "runs": reverse(s["runs"]), "receipts": [], "note": ""}
+    try
+        set d["employer"] to v.me()
+        set d["eth"] to v.from_units(text(eth_balance(c["rpc"], d["employer"])), 18)
+        set d["token_balance"] to human(c, v.token_balance_of(c, d["token"], d["employer"]))
+    recover e
+        set d["note"] to "the stack does not answer: " + text(e)
+    when d["deployed"]
+        try
+            let keys be p521_pair(s)
+            let last be latest_event(c, keys, ["payrun", "deposit"])
+            when last != nothing
+                set d["balance"] to human(c, last["balance"])
+            each item in v.app_events(c, 5)
+                when item["label"] == "payrun"
+                    let r be abi_decode("(uint256,uint256,bytes32)", v.hex_bytes(item["data"]))
+                    set d["receipts"] to append(d["receipts"], {"run": text(r[0]), "count": text(r[1]), "hash": "0x" + decode(r[2], "hex"), "block": item["block"]})
+        recover e
+            set d["note"] to "could not read the enclave's events: " + text(e)
+        let i be 0
+        each e in s["employees"]
+            set d["employees"] to append(d["employees"], {"i": i, "name": e["name"], "address": e["address"]})
+            set i to i + 1
+    give render("pages/home.html", d)
+
+task payslips_page(s, e, i)
+    let c be config(s)
+    let keys be p521_pair(s)
+    let d be {"name": e["name"], "address": e["address"], "i": i, "payslips": [], "balance": "", "wallet": "", "token": v.app_token(c), "err": ""}
+    try
+        set d["wallet"] to human(c, v.token_balance_of(c, d["token"], e["address"]))
+        each item in v.events_with(c, keys["key"], person_key(e), 30)
+            when contains(item, "event") and contains(item["event"], "type")
+                let ev be item["event"]
+                when ev["type"] == "payslip"
+                    set d["payslips"] to append(d["payslips"], {"run": text(ev["run"]), "period": ev["period"], "amount": human(c, ev["amount"]), "memo": ev["memo"], "balance": human(c, ev["balance"]), "block": item["block"]})
+                when d["balance"] == "" and contains(ev, "balance")
+                    set d["balance"] to human(c, ev["balance"])
+    recover err
+        set d["err"] to text(err)
+    give render("pages/employee.html", d)
+
+serve on 8080
+    timeout 300
+    route "GET /"
+        give overview(load(), text(field(query, "ok", "")), text(field(query, "err", "")))
+    route "POST /deploy"
+        try
+            give back(do_deploy(load()), "")
+        recover err
+            give back("", "deploy failed: " + text(err))
+    route "POST /fund"
+        try
+            give back(do_fund(load(), trim(text(field(form of request, "amount", "")))), "")
+        recover err
+            give back("", "funding failed: " + text(err))
+    route "POST /employees"
+        try
+            give back(do_onboard(load(), trim(text(field(form of request, "name", "")))), "")
+        recover err
+            give back("", "onboarding failed: " + text(err))
+    route "POST /payrun"
+        try
+            give back(do_payrun(load(), form of request), "")
+        recover err
+            give back("", "the pay run failed: " + text(err))
+    route "GET /employees/:i"
+        let s be load()
+        let e be find_employee(s, params.i)
+        when e == nothing
+            give fail(404, "no such person")
+        give payslips_page(s, e, params.i)
+    route "POST /employees/:i/payout"
+        let s be load()
+        let e be find_employee(s, params.i)
+        when e == nothing
+            give fail(404, "no such person")
+        try
+            do_payout(s, e, trim(text(field(form of request, "amount", ""))))
+            give redirect("/employees/" + params.i, 302)
+        recover err
+            give back("", "the payout failed: " + text(err))

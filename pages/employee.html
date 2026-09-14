@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{ name } · payslips</title>
+<style>
+{ raw }
+  :root{--ink:#1c1c1a;--dim:#6b6b66;--line:#e6e2d8;--paper:#fbfaf7;--ok:#1f7a4d;--no:#b23a3a;--accent:#2b4c7e}
+  body{margin:0;font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);background:var(--paper)}
+  main{max-width:760px;margin:0 auto;padding:28px 16px 60px}
+  h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin:0 0 10px}
+  .box{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}.dim{color:var(--dim)}.small{font-size:13px}
+  .flash{padding:10px 12px;border-radius:8px;border:1px solid #e9c1c1;background:#fbeeee;color:var(--no)}
+  label{display:block;font-size:13px;color:var(--dim);margin:8px 0 4px}input[type=text]{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font:inherit}
+  button{padding:9px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;font:inherit;cursor:pointer;margin-top:8px}button:disabled{opacity:.6;cursor:wait}
+  table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line)}th{font-weight:600;color:var(--dim);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+  .kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:14px}.kv b{color:var(--dim);font-weight:500}
+  a{color:var(--accent)}
+{ end }
+</style>
+</head>
+<body>
+<main>
+  <p class="small"><a href="/">← the payroll</a></p>
+  <h1>{ name }</h1>
+  <p class="dim small mono">{ address }</p>
+  { when err != "" }<p class="flash">{ err }</p>{ end }
+  <section class="box">
+    <h2>Balances</h2>
+    <div class="kv"><b>In the enclave</b><span>{ balance }</span><b>In the wallet</b><span>{ wallet }</span></div>
+    <form method="post" action="/employees/{ i }/payout"><label>Pay out to the wallet (tokens)</label><input type="text" name="amount" placeholder="500.25" required><button type="submit" data-busy="Paying out…">Pay out</button></form>
+    <p class="dim small">A withdrawal signed by { name } and submitted by the employer's facilitator (no ETH on their side), then the on-chain claim.</p>
+  </section>
+  <section class="box">
+    <h2>Payslips · decrypted with { name }'s key</h2>
+    <table>
+      <tr><th>Run</th><th>Period</th><th>Amount</th><th>Memo</th><th>Balance after</th><th>Block</th></tr>
+      { each p in payslips }<tr><td>{ p.run }</td><td>{ p.period }</td><td>{ p.amount }</td><td>{ p.memo }</td><td>{ p.balance }</td><td class="mono">{ p.block }</td></tr>{ otherwise }<tr><td colspan="6" class="dim">No payslips yet.</td></tr>{ end }
+    </table>
+    <p class="dim small">Encrypted by the enclave for this person alone; the employer's summary carries no per-person line.</p>
+  </section>
+</main>
+<script>
+{ raw }
+  document.querySelectorAll("form").forEach(function (f) { f.addEventListener("submit", function () { var b = f.querySelector("button[data-busy]"); if (b) { b.textContent = b.dataset.busy; setTimeout(function () { b.disabled = true; }, 0); } }); });
+{ end }
+</script>
+</body>
+</html>

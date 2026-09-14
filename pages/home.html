@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Private payroll on Vela</title>
+<style>
+{ raw }
+  :root{--ink:#1c1c1a;--dim:#6b6b66;--line:#e6e2d8;--paper:#fbfaf7;--ok:#1f7a4d;--no:#b23a3a;--accent:#2b4c7e}
+  body{margin:0;font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);background:var(--paper)}
+  main{max-width:960px;margin:0 auto;padding:28px 16px 60px}
+  h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin:0 0 10px}
+  .box{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  .row{display:flex;gap:14px;flex-wrap:wrap}.row>*{flex:1;min-width:240px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+  .dim{color:var(--dim)}.small{font-size:13px}
+  .flash{padding:10px 12px;border-radius:8px;border:1px solid var(--line);margin:0 0 12px}.flash.ok{border-color:#bfe3cf;background:#eef8f2;color:var(--ok)}.flash.err{border-color:#e9c1c1;background:#fbeeee;color:var(--no)}
+  form{margin:0}label{display:block;font-size:13px;color:var(--dim);margin:8px 0 4px}
+  input[type=text],input[type=number]{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font:inherit}
+  button{padding:9px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;font:inherit;cursor:pointer;margin-top:8px}button.quiet{background:#fff;color:var(--accent)}button:disabled{opacity:.6;cursor:wait}
+  table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:600;color:var(--dim);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+  .kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:14px}.kv b{color:var(--dim);font-weight:500}
+  a{color:var(--accent)}
+{ end }
+</style>
+</head>
+<body>
+<main>
+  <h1>Private payroll on Vela</h1>
+  <p class="dim small">An employer funds the app with a stablecoin and runs payroll; each person sees only their own payslips; the chain sees deposits, withdrawals and one receipt per run. Every action below is one request to the enclave: 30 to 60 seconds on a devnet.</p>
+  { when ok != "" }<p class="flash ok">{ ok }</p>{ end }
+  { when err != "" }<p class="flash err">{ err }</p>{ end }
+  { when note != "" }<p class="flash err">{ note }</p>{ end }
+
+  <div class="row">
+    <section class="box">
+      <h2>The employer</h2>
+      <div class="kv">
+        <b>Stack</b><span class="mono">{ host }</span>
+        <b>Address</b><span class="mono">{ employer }</span>
+        <b>ETH</b><span>{ eth }</span>
+        <b>Token</b><span class="mono">{ token }</span>
+        <b>In the wallet</b><span>{ token_balance }</span>
+        { when deployed }<b>App</b><span class="mono">{ app_id }</span><b>In the enclave</b><span>{ balance }</span>{ end }
+      </div>
+    </section>
+    <section class="box">
+      { when deployed }
+      <h2>Fund the payroll</h2>
+      <form method="post" action="/fund"><label>Tokens to deposit</label><input type="text" name="amount" placeholder="5000" required><button type="submit" data-busy="Funding…">Fund</button></form>
+      <p class="dim small">Approves the token and deposits it into the enclave. Only the employer's balance pays runs.</p>
+      { otherwise }
+      <h2>Not deployed yet</h2>
+      <p class="small">The first step embeds this repository's <span class="mono">app/app.syn</span> into the release's guest module, deploys it to Vela for this employer and token, and registers the employer's key with the enclave.</p>
+      <form method="post" action="/deploy"><button type="submit" data-busy="Deploying… about a minute">Deploy the payroll</button></form>
+      { end }
+    </section>
+  </div>
+
+  { when deployed }
+  <section class="box">
+    <h2>People</h2>
+    <table>
+      <tr><th>Name</th><th>Address</th><th></th></tr>
+      { each e in employees }
+      <tr><td>{ e.name }</td><td class="mono">{ e.address }</td><td><a href="/employees/{ e.i }">payslips · payout</a></td></tr>
+      { otherwise }
+      <tr><td colspan="3" class="dim">Nobody yet. Onboard someone: a key is made for them and registered through the facilitator, so they need no ETH.</td></tr>
+      { end }
+    </table>
+    <form method="post" action="/employees"><label>Onboard a person</label><input type="text" name="name" placeholder="Ana" required><button type="submit" data-busy="Registering…">Onboard</button></form>
+  </section>
+
+  <section class="box">
+    <h2>Pay run</h2>
+    { when length(employees) > 0 }
+    <form method="post" action="/payrun">
+      <div class="row"><div><label>Period</label><input type="text" name="period" placeholder="2026-09"></div><div><label>Memo</label><input type="text" name="memo" placeholder="September salary"></div></div>
+      <table>
+        <tr><th>Name</th><th>Amount (tokens)</th></tr>
+        { each e in employees }<tr><td>{ e.name } <span class="dim mono small">{ e.address }</span></td><td><input type="text" name="amount_{ e.i }" placeholder="1500.50"></td></tr>{ end }
+      </table>
+      <button type="submit" data-busy="Running the payroll…">Run payroll</button>
+    </form>
+    <p class="dim small">Every person gets an encrypted payslip; the employer a summary; the chain a receipt with the run number, the head count and a hash of the items. Nothing else leaves the enclave.</p>
+    { otherwise }
+    <p class="dim">Onboard at least one person first.</p>
+    { end }
+  </section>
+
+  <div class="row">
+    <section class="box">
+      <h2>Runs</h2>
+      <table>
+        <tr><th>Period</th><th>People</th><th>Total</th><th>Block</th></tr>
+        { each r in runs }<tr><td>{ r.period }</td><td>{ r.count }</td><td>{ r.total }</td><td class="mono">{ r.block }</td></tr>{ otherwise }<tr><td colspan="4" class="dim">No runs yet.</td></tr>{ end }
+      </table>
+    </section>
+    <section class="box">
+      <h2>What the chain sees</h2>
+      <table>
+        <tr><th>Run</th><th>People</th><th>Hash of the items</th><th>Block</th></tr>
+        { each r in receipts }<tr><td>{ r.run }</td><td>{ r.count }</td><td class="mono small">{ r.hash }</td><td class="mono">{ r.block }</td></tr>{ otherwise }<tr><td colspan="4" class="dim">No receipts yet.</td></tr>{ end }
+      </table>
+      <p class="dim small">Public app events of this app: no names, no amounts.</p>
+    </section>
+  </div>
+  { end }
+  <p class="dim small">Built with <a href="https://synsema.dev/en/0.6.x/73-vela">Synsema on Vela</a> · the code: <a href="https://github.com/SYNSEMA/vela-payroll">SYNSEMA/vela-payroll</a></p>
+</main>
+<script>
+{ raw }
+  document.querySelectorAll("form").forEach(function (f) { f.addEventListener("submit", function () { var b = f.querySelector("button[data-busy]"); if (b) { b.textContent = b.dataset.busy; setTimeout(function () { b.disabled = true; }, 0); } }); });
+{ end }
+</script>
+</body>
+</html>

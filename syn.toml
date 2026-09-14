@@ -1,26 +1,36 @@
-# A Vela (Horizen) app in Synsema as a recipe: the guest in app/app.syn (built to build/app.wasm
-# and deployed to Vela), the client in client/ (the side outside the enclave). This file only says
-# what the code cannot say about itself; the `require` blocks are the manifests of capabilities.
-# Phase 1 runs locally with the `synsema` binary. Phase 2 (a `worker` that watches the app from
-# the Synsema platform) will make `entry` deployable with `syn deploy`.
+# Private payroll on Vela (Horizen) as a recipe: the entry is the payroll console (web.syn), a web app
+# that embeds app/app.syn into the release's guest module, deploys it to Vela and runs the payroll from
+# the browser. This file only says what the code cannot say about itself; the `require` blocks are
+# the manifests of capabilities. The CLI in client/ does the same from a terminal.
 
 name = "Private payroll on Vela"
 slug = "vela-payroll"
-version = "0.1.1"
-kind = "worker"
-entry = "client/vela_client.syn"
+version = "0.2.0"
+kind = "web"
+entry = "web.syn"
 engine = "0.6"
 tagline = "Private payroll on Horizen's Vela, in Synsema: an employer pays a list of people in a stablecoin; each sees only their payslips."
 tagline_es = "Nómina privada en Vela (Horizen) con Synsema: una empresa paga a una lista de personas en stablecoin; cada una ve sólo sus recibos."
 tagline_pt = "Folha de pagamento privada no Vela (Horizen) com Synsema: uma empresa paga uma lista de pessoas em stablecoin; cada uma vê só os seus holerites."
 
 [secrets]
-VELA_SECP_KEY = "secp256k1 key that signs the transactions and pays the fees (hex; Anvil #0 on the local devnet)"
-VELA_P521_KEY = "P-521 private key for the encrypted channel with the Executor (hex; `vela_client.syn -- keys` makes one)"
+VELA_SECP_KEY = "the employer's secp256k1 key: signs the transactions and pays the fees (hex). On the public devnet the provision hands out Anvil #0, the deployer."
+VELA_P521_KEY = "P-521 private key for the encrypted channel with the Executor (hex). Provisioned on the devnet; made by the app itself when empty."
 
+# The public Vela devnet by default: the provision URL hands out a token of your own and fills these
+# (and the keys) when the project is created. Point them at your own Vela stack to leave the devnet.
 [env]
+VELA_RPC_URL = "https://devnet.synsema.app/<token>/rpc"
+VELA_AUTHORITY_URL = "https://devnet.synsema.app/<token>/authority"
+VELA_SUBGRAPH_URL = "https://devnet.synsema.app/<token>/subgraph/subgraphs/name/hcce"
+VELA_PROCESSOR = "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+VELA_TEE_AUTHENTICATOR = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
 VELA_TOKEN = ""
-VELA_RPC_URL = "http://localhost:8545"
-VELA_AUTHORITY_URL = "http://localhost:8081"
-VELA_SUBGRAPH_URL = "http://localhost:8000/subgraphs/name/hcce"
 VELA_MAX_FEE = "100"
+
+[provision]
+env_url = "https://devnet.synsema.app/token"
+
+# the app's state: the app id, the keys it made, the people it onboarded, the runs
+[volumes]
+data = "./data"
