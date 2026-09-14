@@ -82,8 +82,37 @@ task field(m, key, default)
         give m[key]
     give default
 
+-- ---- for people: grouped digits, no trailing zeros, short addresses, the stack's host ----
+
+task group(intp)
+    let out be ""
+    let i be length(intp)
+    while i > 3
+        set out to "," + slice(intp, i - 3, i) + out
+        set i to i - 3
+    give slice(intp, 0, i) + out
+
+task nice(t)
+    let parts be split(text(t), ".")
+    let dec be when length(parts) > 1 then parts[1] otherwise ""
+    when length(dec) > 6
+        set dec to slice(dec, 0, 6)
+    while length(dec) > 0 and slice(dec, length(dec) - 1, length(dec)) == "0"
+        set dec to slice(dec, 0, length(dec) - 1)
+    give group(parts[0]) + (when dec == "" then "" otherwise "." + dec)
+
+task short(address)
+    let a be text(address)
+    when length(a) < 12
+        give a
+    give slice(a, 0, 6) + "…" + slice(a, length(a) - 4, length(a))
+
+task host_of(url)
+    let u be replace_text(replace_text(text(url), "https://", ""), "http://", "")
+    give split(u, "/")[0]
+
 task human(c, u)
-    give v.from_units(text(u), v.token_decimals(c))
+    give nice(v.from_units(text(u), v.token_decimals(c)))
 
 task encrypted(c, keys, plain)
     give v.seal(v.derive_key(keys["key"], v.tee_public_key(c)), bytes(json_encode(plain)))
@@ -192,15 +221,18 @@ task do_payout(s, e, amount)
 
 task overview(s, ok, err)
     let c be config(s)
-    let d be {"ok": ok, "err": err, "host": v.need(c, "rpc", "VELA_RPC_URL"), "employer": "", "eth": "", "token": c["token"], "token_balance": "", "app_id": s["app_id"], "deployed": s["app_id"] != "",
-              "balance": "", "employees": [], "runs": reverse(s["runs"]), "receipts": [], "note": ""}
+    let d be {"ok": ok, "err": err, "host": host_of(v.need(c, "rpc", "VELA_RPC_URL")), "employer": "", "employer_short": "", "eth": "", "token": c["token"], "token_short": short(c["token"]), "token_balance": "", "app_id": s["app_id"], "deployed": s["app_id"] != "",
+              "balance": "", "employees": [], "runs": [], "receipts": [], "note": ""}
+    each r in reverse(s["runs"])
+        set d["runs"] to append(d["runs"], {"period": r["period"], "count": r["count"], "total": nice(r["total"]), "block": r["block"]})
     -- without the stack's token there is nothing to pay with: say so instead of failing
     when c["token"] == ""
         set d["note"] to "VELA_TOKEN is empty: the environment was not provisioned. Set it (the devnet hands it out as VELA_TEST_TOKEN) and redeploy."
         give render("pages/home.html", d)
     try
         set d["employer"] to v.me()
-        set d["eth"] to v.from_units(text(eth_balance(c["rpc"], d["employer"])), 18)
+        set d["employer_short"] to short(d["employer"])
+        set d["eth"] to nice(v.from_units(text(eth_balance(c["rpc"], d["employer"])), 18))
         set d["token_balance"] to human(c, v.token_balance_of(c, d["token"], d["employer"]))
     recover e
         set d["note"] to "the stack does not answer: " + text(e)
@@ -213,19 +245,20 @@ task overview(s, ok, err)
             each item in v.app_events(c, 5)
                 when item["label"] == "payrun"
                     let r be abi_decode("(uint256,uint256,bytes32)", v.hex_bytes(item["data"]))
-                    set d["receipts"] to append(d["receipts"], {"run": text(r[0]), "count": text(r[1]), "hash": "0x" + decode(r[2], "hex"), "block": item["block"]})
+                    let h be "0x" + decode(r[2], "hex")
+                    set d["receipts"] to append(d["receipts"], {"run": text(r[0]), "count": text(r[1]), "hash": h, "hash_short": short(h), "block": item["block"]})
         recover e
             set d["note"] to "could not read the enclave's events: " + text(e)
         let i be 0
         each e in s["employees"]
-            set d["employees"] to append(d["employees"], {"i": i, "name": e["name"], "address": e["address"]})
+            set d["employees"] to append(d["employees"], {"i": i, "name": e["name"], "address": e["address"], "short": short(e["address"])})
             set i to i + 1
     give render("pages/home.html", d)
 
 task payslips_page(s, e, i)
     let c be config(s)
     let keys be p521_pair(s)
-    let d be {"name": e["name"], "address": e["address"], "i": i, "payslips": [], "balance": "", "wallet": "", "token": v.app_token(c), "err": ""}
+    let d be {"name": e["name"], "address": e["address"], "address_short": short(e["address"]), "i": i, "payslips": [], "balance": "", "wallet": "", "token": c["token"], "err": ""}
     try
         set d["wallet"] to human(c, v.token_balance_of(c, d["token"], e["address"]))
         each item in v.events_with(c, keys["key"], person_key(e), 30)
