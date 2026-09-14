@@ -192,8 +192,12 @@ task do_payout(s, e, amount)
 
 task overview(s, ok, err)
     let c be config(s)
-    let d be {"ok": ok, "err": err, "host": v.need(c, "rpc", "VELA_RPC_URL"), "employer": "", "eth": "", "token": v.app_token(c), "token_balance": "", "app_id": s["app_id"], "deployed": s["app_id"] != "",
+    let d be {"ok": ok, "err": err, "host": v.need(c, "rpc", "VELA_RPC_URL"), "employer": "", "eth": "", "token": c["token"], "token_balance": "", "app_id": s["app_id"], "deployed": s["app_id"] != "",
               "balance": "", "employees": [], "runs": reverse(s["runs"]), "receipts": [], "note": ""}
+    -- without the stack's token there is nothing to pay with: say so instead of failing
+    when c["token"] == ""
+        set d["note"] to "VELA_TOKEN is empty: the environment was not provisioned. Set it (the devnet hands it out as VELA_TEST_TOKEN) and redeploy."
+        give render("pages/home.html", d)
     try
         set d["employer"] to v.me()
         set d["eth"] to v.from_units(text(eth_balance(c["rpc"], d["employer"])), 18)
