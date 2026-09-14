@@ -101,9 +101,13 @@ task find_employee(s, i)
         give s["employees"][n]
     give nothing
 
--- a message that survives a query string: no percent, ampersand, hash or plus in it
+-- a message as a query value: the characters a query would misread, percent-encoded
 task qs(msg)
-    let m be replace_text(replace_text(replace_text(replace_text(replace_text(text(msg), "%", " pct"), "&", " and "), "#", " "), "?", " "), "+", " plus ")
+    let m be replace_text(text(msg), "%", "%25")
+    set m to replace_text(m, "&", "%26")
+    set m to replace_text(m, "#", "%23")
+    set m to replace_text(m, "+", "%2B")
+    set m to replace_text(m, "?", "%3F")
     give replace_text(trim(m), " ", "+")
 
 task back(ok, err)
