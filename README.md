@@ -108,8 +108,8 @@ payees, no amounts, no periods.
   `register`s): an event for an unregistered address fails the whole run, nothing moves.
 - The app is deployed for one employer and one token; redeploying creates a new application id, a
   new ledger.
-- Deploying needs an account with `DEPLOYER_ROLE` (Anvil #0 on a devnet, which the provision hands
-  out); the auditor needs `DefaultAuthority.addAllowedAuthority(appId, address)` (`allow-authority`).
+- Deploying needs an account with `DEPLOYER_ROLE` (on the devnet, the account that comes with your
+  token); the auditor needs `DefaultAuthority.addAllowedAuthority(appId, address)` (`allow-authority`).
 - A run takes at most 500 items and the enclave keeps the last 2 000 payslips in state; the
   encrypted payslip events on-chain are the permanent record.
 - Node 22 crashes intermittently inside V8 running this module; use Node 20 or 24+ for `smoke.mjs`.
