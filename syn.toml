@@ -1,17 +1,17 @@
-# Private payroll on Vela (Horizen) as a recipe: the entry is the payroll console (web.syn), a web app
+# Private payroll on Vela (Horizen) as a recipe: the entry is the employer's console (web.syn), a web app
 # that embeds app/app.syn into the release's guest module, deploys it to Vela and runs the payroll from
 # the browser. This file only says what the code cannot say about itself; the `require` blocks are
 # the manifests of capabilities. The CLI in client/ does the same from a terminal.
 
-name = "Private payroll on Vela"
+name = "Private payroll"
 slug = "vela-payroll"
-version = "0.2.5"
+version = "0.2.6"
 kind = "web"
 entry = "web.syn"
 engine = "0.6"
-tagline = "Private payroll on Horizen's Vela, in Synsema: an employer pays a list of people in a stablecoin; each sees only their payslips."
-tagline_es = "Nómina privada en Vela (Horizen) con Synsema: una empresa paga a una lista de personas en stablecoin; cada una ve sólo sus recibos."
-tagline_pt = "Folha de pagamento privada no Vela (Horizen) com Synsema: uma empresa paga uma lista de pessoas em stablecoin; cada uma vê só os seus holerites."
+tagline = "Private payroll on Horizen's Vela, in Synsema: an employer pays a list of people in a stablecoin; nobody outside sees who earns what, each person sees only their payslips, and an auditor gets the report."
+tagline_es = "Nómina privada en Vela (Horizen) con Synsema: una empresa paga a una lista de personas en stablecoin; nadie afuera ve quién cobra cuánto, cada una ve sólo sus recibos y el auditor recibe el reporte."
+tagline_pt = "Folha de pagamento privada no Vela (Horizen) com Synsema: uma empresa paga uma lista de pessoas em stablecoin; ninguém de fora vê quem ganha quanto, cada uma vê só os seus holerites e o auditor recebe o relatório."
 
 [secrets]
 VELA_SECP_KEY = "the employer's secp256k1 key: signs the transactions and pays the fees (hex). On the public devnet the token comes with an account of its own: a deployer with ETH and test tokens."
