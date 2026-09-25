@@ -111,8 +111,14 @@ task run_cli(a)
         is "payrun"
             let items be read_payroll_csv(c, a[1])
             let period be arg_or(a, 2, "")
-            let id be v.submit(c, PROCESS, encrypted(c, {"type": "payrun", "period": period, "items": items}), ETH, 0)
+            -- The blinding salt for the public commitment. It travels inside the ENCRYPTED payload
+            -- (it never reaches the chain) and it is what makes the receipt hiding: without it the
+            -- receipt is a plain hash of a low-entropy list and anyone who guesses your payroll can
+            -- confirm the guess. Keep it with the items: the two together open the commitment.
+            let salt be decode(random_bytes(16), "hex")
+            let id be v.submit(c, PROCESS, encrypted(c, {"type": "payrun", "period": period, "items": items, "salt": salt}), ETH, 0)
             print("pay run submitted (" + text(length(items)) + " items): " + id)
+            print("receipt salt (keep it, it opens the commitment): " + salt)
             let row be v.wait_completed(c, id, false)
             print("pay run completed at block " + text(row["blockNumber"]) + ", fees " + text(row["applicationFees"]) + " wei")
         is "payslips"

@@ -1,10 +1,17 @@
 # vela-payroll — private payroll on Vela (Horizen), in Synsema
 
 An employer funds the app with a stablecoin and runs payroll. Each person sees only their own
-payslips. Names, amounts and balances never leave the enclave: the chain sees deposits,
-withdrawals and one public receipt per run (run number, head count, a hash of the items) — enough
-to prove a run happened and to let anyone who holds the items prove they were paid, and nothing
-more. An auditor the employer allows can ask the enclave for the plain picture.
+payslips. Names, amounts and balances stay inside the enclave: the chain sees one public receipt
+per run — the run number and a commitment to the items, no head count, no amount, nobody's
+address — plus what a blockchain cannot hide anyway (deposits into the app, withdrawals out of it
+as token movements, who submitted each request and when, and the fee, which is the same for every
+request this app serves). An auditor the employer allows can ask the enclave for the plain picture.
+
+That commitment is blinded, and it is not optional: every pay run carries a `salt` — 16 random
+bytes the CLI and the console generate and keep with the items — inside the encrypted payload, and
+a run without one is refused (`missing_salt`). Without blinding, a hash of `[{to, amount, memo}, …]`
+is a commitment over low-entropy inputs: someone who *guesses* your payroll confirms it by
+recomputing the digest. Keep the salt: `(items, salt)` is what opens the receipt later.
 
 Built on [Vela](https://docs.horizen.io/vela/introduction/), whose Executor runs the app inside a
 TEE and settles every result on-chain. The app is **one `.syn` file** with its tests; the module is
@@ -58,7 +65,7 @@ syn.toml                     the recipe descriptor: the console as entry, the pu
 
 ```
 employer ──fund (approve + deposit of the token)──▶ ┌──────────── enclave ────────────┐
-employer ──payrun (encrypted items)───────────────▶ │ balances[employer] -= total      │──▶ chain: receipt(run, count, keccak(items))
+employer ──payrun (encrypted items)───────────────▶ │ balances[employer] -= total      │──▶ chain: payrun(run, keccak(salt+items))
                                                     │ balances[each person] += amount  │──▶ each person: an encrypted payslip
                                                     │ payslips += …                    │──▶ employer: an encrypted summary
 person ────withdraw (encrypted; via facilitator)──▶ │ balances[person] -= amount       │──▶ chain: a pull-payment in the token
@@ -98,9 +105,11 @@ CLI's `deploy` (the console embeds the program itself).
 
 ## What the chain sees
 
-Per run, one public app event, subtype `payrun`, with `abi.encode(uint256 run, uint256 count,
-bytes32 keccak256(items))`; deposits and withdrawals in the token; request fees. No addresses of
-payees, no amounts, no periods.
+Per run, one public app event, subtype `payrun`, with `abi.encode(uint256 run, bytes32
+keccak256(salt ‖ items))`; deposits and withdrawals in the token; who submitted each request and
+when; request fees (one value for every request this app serves, so the fee does not say which
+instruction ran). No addresses of payees, no amounts, no periods — and no head count: how many
+people a company pays is not something a chain needs to know.
 
 ## Gotchas
 

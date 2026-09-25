@@ -200,10 +200,13 @@ task do_payrun(s, f)
     when length(items) == 0
         raise("give at least one amount")
     let period be text(field(f, "period", ""))
-    let id be v.submit(c, PROCESS, encrypted(c, keys, {"type": "payrun", "period": period, "items": items}), ETH, 0)
+    -- The blinding salt of the public commitment: inside the encrypted payload, never on-chain,
+    -- and kept here with the run so the employer can open the receipt later.
+    let salt be decode(random_bytes(16), "hex")
+    let id be v.submit(c, PROCESS, encrypted(c, keys, {"type": "payrun", "period": period, "items": items, "salt": salt}), ETH, 0)
     let row be v.wait_completed(c, id, false)
     let summary be latest_event(c, keys, ["payrun"])
-    set s["runs"] to append(s["runs"], {"period": period, "count": length(items), "total": when summary == nothing then "" otherwise human(c, summary["total"]), "block": text(row["blockNumber"]), "request": id})
+    set s["runs"] to append(s["runs"], {"period": period, "count": length(items), "total": when summary == nothing then "" otherwise human(c, summary["total"]), "block": text(row["blockNumber"]), "request": id, "salt": salt})
     save(s)
     give "pay run of " + text(length(items)) + " people done at block " + text(row["blockNumber"])
 
@@ -244,9 +247,13 @@ task overview(s, ok, err)
                 set d["balance"] to human(c, last["balance"])
             each item in v.app_events(c, 5)
                 when item["label"] == "payrun"
-                    let r be abi_decode("(uint256,uint256,bytes32)", v.hex_bytes(item["data"]))
-                    let h be "0x" + decode(r[2], "hex")
-                    set d["receipts"] to append(d["receipts"], {"run": text(r[0]), "count": text(r[1]), "hash": h, "hash_short": short(h), "block": item["block"]})
+                    -- (uint256 run, bytes32 commitment): no head count on-chain any more. The
+                    -- commitment is blinded with the run's salt, which the app now requires and
+                    -- this console generates; the runs table above keeps it so you can open the
+                    -- receipt later (items + salt).
+                    let r be abi_decode("(uint256,bytes32)", v.hex_bytes(item["data"]))
+                    let h be "0x" + decode(r[1], "hex")
+                    set d["receipts"] to append(d["receipts"], {"run": text(r[0]), "hash": h, "hash_short": short(h), "block": item["block"]})
         recover e
             set d["note"] to "could not read the enclave's events: " + text(e)
         let i be 0

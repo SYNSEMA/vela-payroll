@@ -1,24 +1,31 @@
 -- Private payroll on Vela. An employer funds the app with a stablecoin and runs pay runs; each
--- person sees only their own payslips; balances, names and amounts never leave the enclave;
--- withdrawals settle on-chain as pull-payments; an allowed authority (an auditor) can ask for
+-- person sees only their own payslips; balances, names, amounts and the head count stay inside
+-- the enclave (the public receipt is the run number and a blinded commitment to the items, and
+-- nothing else); withdrawals settle on-chain as pull-payments, so the payee and the amount of a
+-- withdrawal are public like any token movement; an allowed authority (an auditor) can ask for
 -- the plain picture. This file is the WHOLE application: it is embedded into the guest module
 -- (`scripts/build.sh` → build/app.wasm), so the SHA-256 Vela verifies on-chain covers it.
 --
 -- Entry points (one map in, one map out; see https://synsema.dev/en/0.6.x/73-vela):
---   deploy(ctx)       params {"employer": "0x…", "token"?: "0x…"}  (token defaults to ETH; use a stablecoin)
+--   deploy(ctx)       params {"employer": "0x…", "token"?: "0x…", "policy"?: {…}}  (token defaults to ETH; use a stablecoin)
 --   deposit(ctx)      only the app's token; credits the sender (normally the employer funding a run)
 --   process(ctx)      {"type": "payrun", "period"?, "items": [{"to", "amount", "memo"?}, …]}   employer only
 --                     {"type": "withdraw", "amount", "to"?}                                       anyone with a balance
 --   deanonymize(ctx)  {"report_type"?: "balances" | "payslips", "address"?}                      an allowed authority
+--   invariants(ctx)   after every transition: every unit is in a balance (conservation), the nonce moves once
 --
 -- Amounts are the token's smallest unit as decimal TEXT (USDC: 6 decimals → "1500500000" is 1500.50).
 -- The client converts from human amounts. Deterministic by construction: no clock, no randomness.
+-- The fee and the error text of a request are public on-chain: errors are CODES (the sentence, with
+-- the balance, goes in `error_detail` — the Executor's log only) and there is ONE fuel for the app.
 -- Test natively before building: `synsema test app/app.syn`.
 intent: "vela app: private payroll — an employer pays a list of people, each sees only their payslips"
 
 let ETH be "0x0000000000000000000000000000000000000000"
 let MAX_ITEMS be 500
 let MAX_PAYSLIPS be 2000
+-- One fuel for every entry point: a per-branch value would name the instruction on-chain.
+let FUEL be "60"
 
 task hex_of(b)
     give "0x" + decode(b, "hex")
@@ -47,69 +54,81 @@ task set_balance(state, account, amount)
 task deploy(ctx)
     let params be ctx["params"]
     when params == nothing or not contains(params, "employer") or not is_address(params["employer"])
-        give {"error": "deploy needs constructorParams {\"employer\": \"0x…\", \"token\"?: \"0x…\"}"}
+        give {"error": declassify("missing_employer", "the outcome code is public on-chain"), "error_detail": "deploy needs constructorParams {\"employer\": \"0x…\", \"token\"?: \"0x…\"}"}
     let token be when contains(params, "token") and params["token"] != nothing and params["token"] != "" then params["token"] otherwise ETH
     when not is_address(token)
-        give {"error": "invalid token address " + text(token)}
-    give {"state": new_state(ctx["app_id"], lower(params["employer"]), lower(token)), "fuel": "5"}
+        give {"error": declassify("invalid_token", "the outcome code is public on-chain"), "error_detail": "invalid token address " + text(token)}
+    let r be {"state": new_state(ctx["app_id"], lower(params["employer"]), lower(token)), "fuel": FUEL}
+    -- Output policy (reject: "private", events_pad, events_min): the adapter stores it in the state.
+    when contains(params, "policy") and params["policy"] != nothing
+        set r["policy"] to params["policy"]
+    give r
 
 -- Cache warm-up after an Executor restart; the state returned here is discarded.
 task load_module(ctx)
-    give {"state": new_state(ctx["app_id"], "", ETH), "fuel": "5"}
+    give {"state": new_state(ctx["app_id"], "", ETH), "fuel": FUEL}
 
 task deposit(ctx)
     let state be ctx["state"]
     when lower(ctx["token"]) != state["token"]
-        give {"error": "this payroll runs on " + state["token"] + ", not " + lower(ctx["token"])}
+        give {"error": declassify("token_not_allowed", "the outcome code is public on-chain"), "error_detail": "this payroll runs on " + state["token"] + ", not " + lower(ctx["token"])}
     let amount be decimal(ctx["value"])
     let after be balance_of(state, ctx["sender"]) + amount
     let s1 be set_balance(state, ctx["sender"], after)
     set s1["nonce"] to s1["nonce"] + 1
     let event be {"type": "deposit", "amount": ctx["value"], "balance": text(after), "nonce": s1["nonce"]}
-    give {"state": s1, "events": [{"user": ctx["sender"], "data": event}], "fuel": "35"}
+    give {"state": s1, "events": [{"user": ctx["sender"], "data": event}], "fuel": FUEL}
 
 task process(ctx)
     let payload be ctx["payload"]
     when payload == nothing or not contains(payload, "type")
-        give {"error": "payload needs a \"type\": payrun | withdraw"}
-    match payload["type"]
+        give {"error": declassify("missing_type", "the outcome code is public on-chain"), "error_detail": "payload needs a \"type\": payrun | withdraw"}
+    -- The payload is private, so branching on it labels everything this branch produces — and
+    -- that is fine: the adapter's root sink is {app}, and only the fields that really go on-chain
+    -- (the error code, a withdrawal, an app event) ask for a `declassify` of their own. The
+    -- dispatch is NOT declassified: the fee is uniform across every branch, so it does not reveal
+    -- the instruction, and nothing else here does either.
+    let kind be text(payload["type"])
+    match kind
         is "payrun"
             give payrun(ctx, ctx["state"], payload)
         is "withdraw"
             give withdraw(ctx, ctx["state"], payload)
         otherwise
-            give {"error": "unsupported instruction type: " + text(payload["type"])}
+            give {"error": declassify("unknown_type", "the outcome code is public on-chain"), "error_detail": "unsupported instruction type: " + text(payload["type"])}
 
 -- One pay run: the employer's balance pays every item; each person gets an encrypted payslip, the
 -- employer a summary, and the chain a public receipt (run, count, keccak of the items) that proves
 -- the run happened without revealing who or how much.
 task payrun(ctx, state, payload)
     when ctx["sender"] != state["employer"]
-        give {"error": "only the employer runs payroll"}
+        give {"error": declassify("not_employer", "the outcome code is public on-chain"), "error_detail": "only the employer runs payroll"}
     when not contains(payload, "items") or payload["items"] == nothing or length(payload["items"]) == 0
-        give {"error": "payrun needs a non-empty \"items\" list"}
+        give {"error": declassify("missing_items", "the outcome code is public on-chain"), "error_detail": "payrun needs a non-empty \"items\" list"}
     let items be payload["items"]
     when length(items) > MAX_ITEMS
-        give {"error": "a pay run takes at most " + text(MAX_ITEMS) + " items"}
+        give {"error": declassify("too_many_items", "the outcome code is public on-chain"), "error_detail": "a pay run takes at most " + text(MAX_ITEMS) + " items"}
     let period be when contains(payload, "period") and payload["period"] != nothing then text(payload["period"]) otherwise ""
-    let total be decimal("0")
+    let total be private(decimal("0"), "app")
     each item in items
         when not contains(item, "to") or not is_address(item["to"])
-            give {"error": "every item needs a \"to\" address"}
+            give {"error": declassify("missing_to", "the outcome code is public on-chain"), "error_detail": "every item needs a \"to\" address"}
         when not contains(item, "amount") or item["amount"] == nothing
-            give {"error": "every item needs an \"amount\""}
+            give {"error": declassify("missing_amount", "the outcome code is public on-chain"), "error_detail": "every item needs an \"amount\""}
         let amount be decimal(text(item["amount"]))
         when amount <= decimal("0")
-            give {"error": "amounts must be positive"}
+            give {"error": declassify("amount_not_positive", "the outcome code is public on-chain"), "error_detail": "amounts must be positive"}
         set total to total + amount
     let available be balance_of(state, state["employer"])
     when available < total
-        give {"error": "insufficient funds: the run needs " + text(total) + ", the employer has " + text(available)}
+        -- The balance stays in the detail (log): on-chain only the code.
+        give {"error": declassify("insufficient_funds", "the outcome code is public on-chain"), "error_detail": "insufficient funds: the run needs " + text(total) + ", the employer has " + text(available)}
     let run be state["runs"] + 1
     let s1 be set_balance(state, state["employer"], available - total)
     set s1["runs"] to run
     set s1["nonce"] to s1["nonce"] + 1
-    let events be []
+    -- Accumulated under branches over the private payload: born private.
+    let events be private([], "app")
     let payslips be s1["payslips"]
     each item in items
         let dest be lower(item["to"])
@@ -123,32 +142,53 @@ task payrun(ctx, state, payload)
     when length(payslips) > MAX_PAYSLIPS
         set payslips to slice(payslips, length(payslips) - MAX_PAYSLIPS, length(payslips))
     set s1["payslips"] to payslips
+    -- The employer's own event (encrypted to them) carries the headcount and the total: that is
+    -- where those numbers belong.
     set events to append(events, {"user": state["employer"], "data": {"type": "payrun", "run": run, "period": period, "count": length(items), "total": text(total), "balance": text(available - total), "nonce": s1["nonce"]}})
-    -- Public receipt: abi.encode(uint256 run, uint256 count, bytes32 keccak(items)). Whoever holds
-    -- the items can prove this run paid exactly them; nobody else learns who or how much.
-    let call be abi_encode("payrun(uint256,uint256,bytes32)", [run, length(items), keccak256(json_encode(items))])
-    let receipt be {"subtype": "payrun", "data_hex": hex_of(slice(call, 4, length(call)))}
-    give {"state": s1, "events": events, "app_events": [receipt], "fuel": "60"}
+    -- Public receipt: abi.encode(uint256 run, bytes32 commitment). It proves run <n> happened and
+    -- commits to what it paid; whoever holds the items AND the blinding salt can check it.
+    --
+    -- Two things it deliberately does NOT do (audit round 2):
+    --   · it does not carry the headcount. `length(items)` is the size of the payroll — how many
+    --     people the company pays, per run, on a public chain. Nobody needs it on-chain.
+    --   · it is not an unsalted hash of the items. A keccak over `[{to, amount, memo}, …]` is a
+    --     commitment over LOW-ENTROPY inputs: an observer who guesses a plausible payroll
+    --     (addresses are public, salaries come in round numbers) confirms it by recomputing the
+    --     digest. A commitment without blinding hides nothing from someone who can guess.
+    -- So the employer sends a `salt` inside the ENCRYPTED payload and keeps it: the commitment is
+    -- keccak256(salt ‖ json(items)) and only (items, salt) opens it. It is REQUIRED (audit round
+    -- 3): while it was optional nobody sent one — not the client, not the console, not the e2e
+    -- script — so every real run published an unblinded hash while the declassify reason claimed
+    -- "blinded commitment". A mechanism nobody invokes is not a mechanism. The client and the
+    -- console now generate 16 random bytes per run and keep them next to the items.
+    let salt be when contains(payload, "salt") and payload["salt"] != nothing then text(payload["salt"]) otherwise ""
+    when salt == ""
+        give {"error": declassify("missing_salt", "the outcome code is public on-chain"), "error_detail": "payrun needs a \"salt\" in the encrypted payload: it blinds the public commitment (16 random bytes; keep it with the items to open the receipt later)"}
+    let commitment be keccak256(bytes(salt + "|" + json_encode(items)))
+    let call be abi_encode("payrun(uint256,bytes32)", [run, commitment])
+    -- Public on-chain (run id, commitment) and computed from the private run: declassified on purpose.
+    let receipt be declassify({"subtype": "payrun", "data_hex": hex_of(slice(call, 4, length(call)))}, "public receipt of the pay run: (run id, commitment to the items, blinded with the salt from the encrypted payload) — no person, no amount, no headcount")
+    give {"state": s1, "events": events, "app_events": [receipt], "fuel": FUEL}
 
 -- {"type": "withdraw", "amount": "<units>", "to"?: "0x…"} → a pull-payment the recipient (or anyone
 -- for them) claims on-chain with claim(token, payee). Employees never need ETH: the employer's
 -- facilitator submits the request and triggers the claim.
 task withdraw(ctx, state, payload)
     when not contains(payload, "amount") or payload["amount"] == nothing
-        give {"error": "withdraw needs an \"amount\""}
+        give {"error": declassify("missing_amount", "the outcome code is public on-chain"), "error_detail": "withdraw needs an \"amount\""}
     let amount be decimal(text(payload["amount"]))
     when amount <= decimal("0")
-        give {"error": "amounts must be positive"}
+        give {"error": declassify("amount_not_positive", "the outcome code is public on-chain"), "error_detail": "amounts must be positive"}
     let dest be when contains(payload, "to") and payload["to"] != nothing and payload["to"] != "" then lower(payload["to"]) otherwise ctx["sender"]
     when not is_address(dest)
-        give {"error": "invalid destination address " + text(dest)}
+        give {"error": declassify("invalid_destination", "the outcome code is public on-chain"), "error_detail": "invalid destination address " + text(dest)}
     let available be balance_of(state, ctx["sender"])
     when available < amount
-        give {"error": "insufficient balance: " + text(available) + " < " + text(amount)}
+        give {"error": declassify("insufficient_balance", "the outcome code is public on-chain"), "error_detail": "insufficient balance: " + text(available) + " < " + text(amount)}
     let s1 be set_balance(state, ctx["sender"], available - amount)
     set s1["nonce"] to s1["nonce"] + 1
     let event be {"type": "withdrawal", "to": dest, "amount": text(amount), "balance": text(available - amount), "nonce": s1["nonce"]}
-    give {"state": s1, "events": [{"user": ctx["sender"], "data": event}], "withdrawals": [{"token": state["token"], "to": dest, "amount": text(amount)}], "fuel": "50"}
+    give {"state": s1, "events": [{"user": ctx["sender"], "data": event}], "withdrawals": [declassify({"token": state["token"], "to": dest, "amount": text(amount)}, "the pull-payment settles on-chain: payee, token and amount are public by construction")], "fuel": FUEL}
 
 -- Request type 2, for an allowed authority (an auditor): the plain picture, encrypted to them.
 task deanonymize(ctx)
@@ -157,14 +197,58 @@ task deanonymize(ctx)
     let report_type be when payload != nothing and contains(payload, "report_type") and payload["report_type"] != nothing then payload["report_type"] otherwise "balances"
     match report_type
         is "balances"
-            give {"report": {"employer": state["employer"], "token": state["token"], "runs": state["runs"], "balances": state["balances"]}, "fuel": "20"}
+            give {"report": {"employer": state["employer"], "token": state["token"], "runs": state["runs"], "balances": state["balances"]}, "fuel": FUEL}
         is "payslips"
             when payload != nothing and contains(payload, "address") and payload["address"] != nothing
                 let addr be lower(payload["address"])
-                give {"report": {"address": addr, "payslips": where(state["payslips"], (p) => p["to"] == addr)}, "fuel": "20"}
-            give {"report": {"payslips": state["payslips"]}, "fuel": "20"}
+                give {"report": {"address": addr, "payslips": where(state["payslips"], (p) => p["to"] == addr)}, "fuel": FUEL}
+            give {"report": {"payslips": state["payslips"]}, "fuel": FUEL}
         otherwise
-            give {"error": "unsupported report type: " + text(report_type)}
+            give {"error": declassify("unknown_report_type", "the outcome code is public on-chain"), "error_detail": "unsupported report type: " + text(report_type)}
+
+-- ---------------------------------------------------------------------------------------
+-- Invariants per transition. The adapter runs this after deploy/deposit/process with
+-- ctx = {kind, before, after, deposit: {token, value, value_hex}?, withdrawals: [{token, to,
+-- amount, amount_hex}], events}. A non-empty list fails the request as `invariant_violation`
+-- (descriptions to the Executor's log, state not applied). A pay run that pays more than it
+-- debits — or debits more than it pays — cannot be signed.
+-- ---------------------------------------------------------------------------------------
+
+task total_of(state)
+    let total be private(decimal("0"), "app")
+    when state == nothing
+        give total
+    each account in keys(state["balances"])
+        set total to total + decimal(state["balances"][account])
+    give total
+
+task invariants(ctx)
+    let broken be private([], "app")
+    let after be ctx["after"]
+    each account in keys(after["balances"])
+        when decimal(after["balances"][account]) < decimal("0")
+            set broken to append(broken, "negative balance for " + account)
+    when length(after["payslips"]) > MAX_PAYSLIPS
+        set broken to append(broken, "payslip log exceeds " + text(MAX_PAYSLIPS))
+    when ctx["kind"] == "deploy" or ctx["kind"] == "load_module"
+        give broken
+    let before be ctx["before"]
+    when after["nonce"] != before["nonce"] + 1
+        set broken to append(broken, "nonce did not advance by one")
+    when after["employer"] != before["employer"] or after["token"] != before["token"]
+        set broken to append(broken, "employer or token changed after deploy")
+    -- Conservation: sum(after) == sum(before) + deposit − withdrawn, all in the payroll token.
+    let expected be total_of(before)
+    when contains(ctx, "deposit")
+        set expected to expected + decimal(ctx["deposit"]["value"])
+    each w in ctx["withdrawals"]
+        set expected to expected - decimal(w["amount"])
+        when lower(w["token"]) != after["token"]
+            set broken to append(broken, "a withdrawal in " + text(w["token"]) + ", not the payroll token")
+    let actual be total_of(after)
+    when actual != expected
+        set broken to append(broken, "conservation broken: expected " + text(expected) + ", have " + text(actual))
+    give broken
 
 -- ---------------------------------------------------------------------------------------
 -- Tests: `synsema test app/app.syn`. The same code runs inside the enclave.
@@ -179,28 +263,67 @@ task company()
     give deploy({"app_id": 1, "kind": "deploy", "params": {"employer": ACME, "token": USDC}})["state"]
 
 task funded(units)
-    give deposit({"app_id": 1, "sender": ACME, "token": USDC, "value": units, "value_hex": "0x0", "state": company()})["state"]
+    give deposit({"app_id": 1, "sender": ACME, "token": USDC, "value": units, "value_hex": "0x0", "state": private(company(), "app")})["state"]
+
+-- Every pay run carries a blinding salt: the client generates 16 random bytes per run and keeps
+-- them with the items. `SALT` stands in for that here.
+let SALT be "0f3c9a5b1e7d2408"
 
 task run_payroll(state, sender, items, period)
-    give process({"app_id": 1, "sender": sender, "request_type": 1, "kind": "process", "payload": {"type": "payrun", "period": period, "items": items}, "payload_hex": nothing, "state": state})
+    give run_payroll_salted(state, sender, items, period, SALT)
 
-test "deploy needs an employer; the token defaults to ETH and is normalized"
+-- A pay run with an explicit salt (or without one: pass "" to see it refused).
+task run_payroll_salted(state, sender, items, period, salt)
+    give process({"app_id": 1, "sender": sender, "request_type": 1, "kind": "process", "payload": private({"type": "payrun", "period": period, "items": items, "salt": salt}, "app"), "payload_hex": nothing, "state": private(state, "app")})
+
+-- Maps are shared by reference and a successful call mutates the state it was given: snapshot
+-- `before` with a deep copy when a test needs both sides of a transition.
+task copy(v)
+    give json_decode(json_encode(v))
+
+-- The ctx the adapter builds for `invariants` after a call (withdrawals normalized the same way).
+task transition(kind, before, r, deposit)
+    -- Under --labels the app's results carry private values: the accumulator is born private.
+    let ws be private([], "app")
+    when contains(r, "withdrawals")
+        each w in r["withdrawals"]
+            set ws to append(ws, {"token": w["token"], "to": w["to"], "amount": w["amount"], "amount_hex": nothing})
+    let ctx be {"kind": kind, "before": before, "after": r["state"], "withdrawals": ws, "events": when contains(r, "events") then r["events"] otherwise []}
+    when deposit != nothing
+        set ctx["deposit"] to deposit
+    give ctx
+
+test "deploy needs an employer; the token defaults to ETH and is normalized; the policy passes through"
     let r be deploy({"app_id": 7, "kind": "deploy", "params": {"employer": "0x1111111111111111111111111111111111111111", "token": "0xA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48"}})
     assert_eq(r["state"]["employer"], ACME)
     assert_eq(r["state"]["token"], USDC)
+    assert_eq(r["fuel"], FUEL)
+    assert(not contains(r, "policy"))
     assert_eq(deploy({"app_id": 7, "kind": "deploy", "params": {"employer": ACME}})["state"]["token"], ETH)
-    assert(starts_with(deploy({"app_id": 7, "kind": "deploy", "params": nothing})["error"], "deploy needs"))
-    assert(starts_with(deploy({"app_id": 7, "kind": "deploy", "params": {"employer": "acme"}})["error"], "deploy needs"))
+    let bare be deploy({"app_id": 7, "kind": "deploy", "params": nothing})
+    assert_eq(bare["error"], "missing_employer")
+    assert(starts_with(bare["error_detail"], "deploy needs"))
+    assert_eq(deploy({"app_id": 7, "kind": "deploy", "params": {"employer": "acme"}})["error"], "missing_employer")
+    assert_eq(deploy({"app_id": 7, "kind": "deploy", "params": {"employer": ACME, "token": "usdc"}})["error"], "invalid_token")
+    let p be deploy({"app_id": 7, "kind": "deploy", "params": {"employer": ACME, "policy": {"reject": "private", "events_min": 2}}})
+    assert_eq(p["policy"], {"reject": "private", "events_min": 2})
+    assert_eq(invariants({"kind": "deploy", "before": nothing, "after": r["state"], "withdrawals": [], "events": []}), [])
 
 test "deposits are accepted only in the payroll token"
-    let ok be deposit({"app_id": 1, "sender": ACME, "token": USDC, "value": "5000000000", "value_hex": "0x0", "state": company()})
+    let before be company()
+    let ok be deposit({"app_id": 1, "sender": ACME, "token": USDC, "value": "5000000000", "value_hex": "0x0", "state": private(copy(before), "app")})
     assert_eq(ok["state"]["balances"][ACME], "5000000000")
-    let bad be deposit({"app_id": 1, "sender": ACME, "token": ETH, "value": "1", "value_hex": "0x1", "state": company()})
-    assert(starts_with(bad["error"], "this payroll runs on"))
+    assert_eq(ok["fuel"], FUEL)
+    assert_eq(invariants(transition("deposit", before, ok, {"token": USDC, "value": "5000000000", "value_hex": "0x0"})), [])
+    let bad be deposit({"app_id": 1, "sender": ACME, "token": ETH, "value": "1", "value_hex": "0x1", "state": private(company(), "app")})
+    assert_eq(bad["error"], "token_not_allowed")
+    assert(starts_with(bad["error_detail"], "this payroll runs on"))
 
 test "a pay run pays everyone, one payslip each, a summary for the employer and a public receipt"
     let items be [{"to": ANA, "amount": "1500500000", "memo": "September"}, {"to": BEN, "amount": "2000000000"}]
-    let r be run_payroll(funded("5000000000"), ACME, items, "2026-09")
+    let s be funded("5000000000")
+    let before be copy(s)
+    let r be run_payroll(s, ACME, items, "2026-09")
     assert_eq(r["state"]["balances"][ACME], "1499500000")
     assert_eq(r["state"]["balances"][ANA], "1500500000")
     assert_eq(r["state"]["balances"][BEN], "2000000000")
@@ -212,39 +335,91 @@ test "a pay run pays everyone, one payslip each, a summary for the employer and 
     assert_eq(r["events"][2]["user"], ACME)
     assert_eq(r["events"][2]["data"]["total"], "3500500000")
     assert_eq(length(r["state"]["payslips"]), 2)
-    let receipt be abi_decode("(uint256,uint256,bytes32)", bytes(slice(r["app_events"][0]["data_hex"], 2, length(r["app_events"][0]["data_hex"])), "hex"))
+    assert_eq(r["fuel"], FUEL)
+    -- The public receipt is (run id, commitment): no headcount, no amount, nobody's address.
+    let receipt be abi_decode("(uint256,bytes32)", bytes(slice(r["app_events"][0]["data_hex"], 2, length(r["app_events"][0]["data_hex"])), "hex"))
     assert_eq(receipt[0], 1)
-    assert_eq(receipt[1], 2)
-    assert_eq(receipt[2], keccak256(json_encode(items)))
+    assert_eq(receipt[1], keccak256(bytes(SALT + "|" + json_encode(items))))
+    assert_eq(length(receipt), 2)
+    -- The headcount and the total are in the employer's own (encrypted) event.
+    assert_eq(r["events"][2]["data"]["count"], 2)
+    assert_eq(invariants(transition("process", before, r, nothing)), [])
 
-test "only the employer runs payroll, and never beyond its balance"
+test "the blinding salt is required, stays out of the chain, and changes the commitment"
+    let items be [{"to": ANA, "amount": "1500500000"}]
+    -- Required: a pay run without one is refused with a code, so no run can publish an unblinded
+    -- commitment by omission (audit round 3: while it was optional, nobody sent one).
+    let bare be run_payroll_salted(funded("5000000000"), ACME, items, "2026-09", "")
+    assert_eq(bare["error"], "missing_salt")
+    assert(starts_with(bare["error_detail"], "payrun needs a "))
+    let one be run_payroll_salted(funded("5000000000"), ACME, items, "2026-09", "0f3c9a")
+    let two be run_payroll_salted(funded("5000000000"), ACME, items, "2026-09", "b41d77")
+    let a be abi_decode("(uint256,bytes32)", bytes(slice(one["app_events"][0]["data_hex"], 2, length(one["app_events"][0]["data_hex"])), "hex"))
+    let b be abi_decode("(uint256,bytes32)", bytes(slice(two["app_events"][0]["data_hex"], 2, length(two["app_events"][0]["data_hex"])), "hex"))
+    -- Same run, same items, different salt: different commitment. Only (items, salt) opens it.
+    assert_eq(a[1], keccak256(bytes("0f3c9a|" + json_encode(items))))
+    assert_eq(b[1], keccak256(bytes("b41d77|" + json_encode(items))))
+    assert(a[1] != b[1])
+    -- The salt never leaves: it is not in the public receipt.
+    assert(not contains(one["app_events"][0]["data_hex"], "0f3c9a"))
+
+test "only the employer runs payroll, and never beyond its balance; every refusal is a code"
     let s be funded("100")
     let intruder be run_payroll(s, ANA, [{"to": BEN, "amount": "1"}], "")
-    assert_eq(intruder["error"], "only the employer runs payroll")
+    assert_eq(intruder["error"], "not_employer")
     let broke be run_payroll(s, ACME, [{"to": BEN, "amount": "101"}], "")
-    assert(starts_with(broke["error"], "insufficient funds"))
+    assert_eq(broke["error"], "insufficient_funds")
+    assert_eq(broke["error_detail"], "insufficient funds: the run needs 101, the employer has 100")
     let empty be run_payroll(s, ACME, [], "")
-    assert(starts_with(empty["error"], "payrun needs"))
+    assert_eq(empty["error"], "missing_items")
     let zero be run_payroll(s, ACME, [{"to": BEN, "amount": "0"}], "")
-    assert_eq(zero["error"], "amounts must be positive")
+    assert_eq(zero["error"], "amount_not_positive")
+    assert_eq(run_payroll(s, ACME, [{"to": "ben", "amount": "1"}], "")["error"], "missing_to")
+    assert_eq(run_payroll(s, ACME, [{"to": BEN}], "")["error"], "missing_amount")
 
 test "an employee withdraws to a pull-payment in the payroll token"
     let paid be run_payroll(funded("5000000000"), ACME, [{"to": ANA, "amount": "1500500000"}], "2026-09")["state"]
-    let r be process({"app_id": 1, "sender": ANA, "request_type": 1, "kind": "process", "payload": {"type": "withdraw", "amount": "500000000"}, "payload_hex": nothing, "state": paid})
+    let before be copy(paid)
+    let r be process({"app_id": 1, "sender": ANA, "request_type": 1, "kind": "process", "payload": private({"type": "withdraw", "amount": "500000000"}, "app"), "payload_hex": nothing, "state": private(paid, "app")})
     assert_eq(r["state"]["balances"][ANA], "1000500000")
     assert_eq(r["withdrawals"], [{"token": USDC, "to": ANA, "amount": "500000000"}])
-    let over be process({"app_id": 1, "sender": ANA, "request_type": 1, "kind": "process", "payload": {"type": "withdraw", "amount": "2000000000"}, "payload_hex": nothing, "state": r["state"]})
-    assert(starts_with(over["error"], "insufficient balance"))
+    assert_eq(invariants(transition("process", before, r, nothing)), [])
+    let over be process({"app_id": 1, "sender": ANA, "request_type": 1, "kind": "process", "payload": private({"type": "withdraw", "amount": "2000000000"}, "app"), "payload_hex": nothing, "state": private(r["state"], "app")})
+    assert_eq(over["error"], "insufficient_balance")
+    assert_eq(over["error_detail"], "insufficient balance: 1000500000 < 2000000000")
+    assert_eq(process({"app_id": 1, "sender": ANA, "request_type": 1, "kind": "process", "payload": private({"type": "withdraw", "amount": "1", "to": "ana"}, "app"), "payload_hex": nothing, "state": private(r["state"], "app")})["error"], "invalid_destination")
 
 test "the auditor's reports: balances, and payslips filtered by address"
     let paid be run_payroll(funded("5000000000"), ACME, [{"to": ANA, "amount": "10"}, {"to": BEN, "amount": "20"}], "2026-09")["state"]
-    let all be deanonymize({"app_id": 1, "sender": ACME, "request_type": 2, "kind": "deanonymize", "payload": {}, "payload_hex": nothing, "state": paid})
+    let all be deanonymize({"app_id": 1, "sender": ACME, "request_type": 2, "kind": "deanonymize", "payload": private({}, "app"), "payload_hex": nothing, "state": private(paid, "app")})
     assert_eq(all["report"]["balances"][ANA], "10")
     assert_eq(all["report"]["runs"], 1)
-    let ana be deanonymize({"app_id": 1, "sender": ACME, "request_type": 2, "kind": "deanonymize", "payload": {"report_type": "payslips", "address": ANA}, "payload_hex": nothing, "state": paid})
+    assert_eq(all["fuel"], FUEL)
+    let ana be deanonymize({"app_id": 1, "sender": ACME, "request_type": 2, "kind": "deanonymize", "payload": private({"report_type": "payslips", "address": ANA}, "app"), "payload_hex": nothing, "state": private(paid, "app")})
     assert_eq(length(ana["report"]["payslips"]), 1)
     assert_eq(ana["report"]["payslips"][0]["amount"], "10")
+    assert_eq(deanonymize({"app_id": 1, "sender": ACME, "request_type": 2, "kind": "deanonymize", "payload": private({"report_type": "x"}, "app"), "payload_hex": nothing, "state": private(paid, "app")})["error"], "unknown_report_type")
 
 test "an unknown instruction is an error, never a silent no-op"
-    let r be process({"app_id": 1, "sender": ACME, "request_type": 1, "kind": "process", "payload": {"type": "mint"}, "payload_hex": nothing, "state": company()})
-    assert(starts_with(r["error"], "unsupported instruction type"))
+    let r be process({"app_id": 1, "sender": ACME, "request_type": 1, "kind": "process", "payload": private({"type": "mint"}, "app"), "payload_hex": nothing, "state": private(company(), "app")})
+    assert_eq(r["error"], "unknown_type")
+    assert(starts_with(r["error_detail"], "unsupported instruction type"))
+    assert_eq(process({"app_id": 1, "sender": ACME, "request_type": 1, "kind": "process", "payload": private({}, "app"), "payload_hex": nothing, "state": private(company(), "app")})["error"], "missing_type")
+
+test "invariants catch a pay run that mints, a withdrawal that leaks, a stuck nonce"
+    let s be funded("100")
+    let before be copy(s)
+    -- Paid 30 to Ana but debited only 20 from the employer.
+    let minted be set_balance(set_balance(copy(s), ANA, decimal("30")), ACME, decimal("80"))
+    set minted["nonce"] to minted["nonce"] + 1
+    let r1 be invariants({"kind": "process", "before": before, "after": minted, "withdrawals": [], "events": []})
+    assert_eq(r1, ["conservation broken: expected 100, have 110"])
+    -- A withdrawal of 10 that debited 15.
+    let leaked be set_balance(copy(s), ACME, decimal("85"))
+    set leaked["nonce"] to leaked["nonce"] + 1
+    let r2 be invariants({"kind": "process", "before": before, "after": leaked, "withdrawals": [{"token": USDC, "to": ACME, "amount": "10", "amount_hex": "0xa"}], "events": []})
+    assert_eq(r2, ["conservation broken: expected 90, have 85"])
+    -- Nothing moved but the nonce did not either; a deposit not credited.
+    let r3 be invariants({"kind": "deposit", "before": before, "after": copy(s), "deposit": {"token": USDC, "value": "5", "value_hex": "0x5"}, "withdrawals": [], "events": []})
+    assert(contains(r3, "nonce did not advance by one"))
+    assert_eq(length(r3), 2)
