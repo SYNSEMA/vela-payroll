@@ -68,7 +68,7 @@ task read_payroll_csv(c, path)
         when not contains(row, "to") or not contains(row, "amount")
             raise("the CSV needs the columns to,amount[,memo]")
         let item be {"to": lower(trim(row["to"])), "amount": v.to_units(row["amount"], d)}
-        when contains(row, "memo") and row["memo"] != nothing and trim(text(row["memo"])) != ""
+        when contains(row, "memo") and not is_missing(row["memo"]) and trim(text(row["memo"])) != ""
             set item["memo"] to trim(text(row["memo"]))
         set items to append(items, item)
     when length(items) == 0
@@ -151,7 +151,7 @@ task run_cli(a)
         is "user-keys"
             let k be decode(random_bytes(32), "hex")
             print("VELA_USER_KEY=" + k)
-            print("address " + eth_address(as_secret(k, "VELA_USER_KEY")))
+            print("address " + evm_address(as_secret(k, "VELA_USER_KEY")))
         -- ---- Vela, generic ----
         is "keys"
             let kp be ecdh_keypair("P-521")

@@ -6,10 +6,10 @@ name: payroll guest
 on: [push, pull_request, workflow_dispatch]
 
 env:
-  SYNSEMA_TAG: v0.6.23
+  SYNSEMA_TAG: v0.6.29
   # The Go probe sends a process_request; set repository variables if your app's instructions differ.
   DEPLOY_PARAMS: ${{ vars.VELA_DEPLOY_PARAMS || '{"employer":"0x1111111111111111111111111111111111111111"}' }}
-  PAYLOAD: ${{ vars.VELA_SMOKE_PAYLOAD || '{"type":"payrun","items":[{"to":"0x2222222222222222222222222222222222222222","amount":"1000","memo":"ci"}]}' }}
+  PAYLOAD: ${{ vars.VELA_SMOKE_PAYLOAD || '{"type":"payrun","items":[{"to":"0x2222222222222222222222222222222222222222","amount":"1000","memo":"ci"}],"salt":"00112233445566778899aabbccddeeff"}' }}
 
 jobs:
   guest:

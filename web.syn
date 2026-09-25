@@ -36,7 +36,9 @@ use "./scripts/embed_lib.syn" as slot
 let ETH be "0x0000000000000000000000000000000000000000"
 let PROCESS be 1
 let ASSOCIATE_KEY be 3
-let GUEST_TAG be env("SYNSEMA_GUEST_TAG", "v0.6.23")
+let GUEST_TAG be env("SYNSEMA_GUEST_TAG", "v0.6.29")
+-- The guest cached per release: bumping GUEST_TAG downloads the new one instead of reusing the old.
+let GUEST_CACHE be "data/guest-" + GUEST_TAG + ".wasm"
 let STATE be "data/payroll.json"
 
 -- ---- state on the volume ----
@@ -59,15 +61,23 @@ task config(s)
 -- ---- keys ----
 
 -- the P-521 pair: from the environment when it is there, else made once and kept in the state
+-- The state with this console's P-521 key, created (and saved) the first time. Maps are values:
+-- a task that goes on to change `s` and save it must take this one back (`set s to with_p521(s)`),
+-- or its save would write the state without the key and the next request would make another.
+task with_p521(s)
+    when env("VELA_P521_KEY", "") != "" or s["p521_key"] != ""
+        give s
+    let kp be ecdh_keypair("P-521")
+    set s["p521_key"] to decode(reveal(kp["private"]), "hex")
+    set s["p521_pub"] to decode(kp["public"], "hex")
+    save(s)
+    give s
+
 task p521_pair(s)
     when env("VELA_P521_KEY", "") != ""
         give {"key": v.p521_key(), "pub": v.p521_public()}
-    when s["p521_key"] == ""
-        let kp be ecdh_keypair("P-521")
-        set s["p521_key"] to decode(reveal(kp["private"]), "hex")
-        set s["p521_pub"] to decode(kp["public"], "hex")
-        save(s)
-    give {"key": v.p521_of(s["p521_key"]), "pub": v.hex_bytes(s["p521_pub"])}
+    let k be with_p521(s)
+    give {"key": v.p521_of(k["p521_key"]), "pub": v.hex_bytes(k["p521_pub"])}
 
 task employer()
     give v.secp_key()
@@ -108,7 +118,7 @@ task short(address)
     give slice(a, 0, 6) + "…" + slice(a, length(a) - 4, length(a))
 
 task host_of(url)
-    let u be replace_text(replace_text(text(url), "https://", ""), "http://", "")
+    let u be replace(replace(text(url), "https://", ""), "http://", "")
     give split(u, "/")[0]
 
 task human(c, u)
@@ -132,12 +142,12 @@ task find_employee(s, i)
 
 -- a message as a query value: the characters a query would misread, percent-encoded
 task qs(msg)
-    let m be replace_text(text(msg), "%", "%25")
-    set m to replace_text(m, "&", "%26")
-    set m to replace_text(m, "#", "%23")
-    set m to replace_text(m, "+", "%2B")
-    set m to replace_text(m, "?", "%3F")
-    give replace_text(trim(m), " ", "+")
+    let m be replace(text(msg), "%", "%25")
+    set m to replace(m, "&", "%26")
+    set m to replace(m, "#", "%23")
+    set m to replace(m, "+", "%2B")
+    set m to replace(m, "?", "%3F")
+    give replace(trim(m), " ", "+")
 
 task back(ok, err)
     when err != ""
@@ -148,13 +158,14 @@ task back(ok, err)
 
 task do_deploy(s)
     let c be config(s)
+    set s to with_p521(s)
     let keys be p521_pair(s)
     let guest be nothing
-    when file_exists("data/guest.wasm")
-        set guest to read_file_bytes("data/guest.wasm")
+    when file_exists(GUEST_CACHE)
+        set guest to read_file_bytes(GUEST_CACHE)
     otherwise
         set guest to slot.release_guest(GUEST_TAG)
-        write_file("data/guest.wasm", guest)
+        write_file(GUEST_CACHE, guest)
     let wasm be slot.embed(guest, read_file("app/app.syn"), "app.syn")
     let ids be v.deploy_bytes(c, wasm, {"employer": v.me(), "token": v.app_token(c)}, nothing)
     v.wait_completed(c, ids["request_id"], true)
@@ -176,10 +187,11 @@ task do_fund(s, amount)
 
 task do_onboard(s, name)
     let c be config(s)
+    set s to with_p521(s)
     let keys be p521_pair(s)
     let key be decode(random_bytes(32), "hex")
     let secret be v.secp_of(key, "VELA_USER_KEY")
-    let address be eth_address(secret)
+    let address be evm_address(secret)
     let id be v.submit_for_with(c, secret, ASSOCIATE_KEY, v.register_payload_with(c, keys["key"], keys["pub"], secret), ETH, 0)
     v.wait_completed(c, id, false)
     set s["employees"] to append(s["employees"], {"name": name, "address": address, "key": key})
@@ -188,6 +200,7 @@ task do_onboard(s, name)
 
 task do_payrun(s, f)
     let c be config(s)
+    set s to with_p521(s)
     let keys be p521_pair(s)
     let d be v.token_decimals(c)
     let items be []
@@ -235,7 +248,7 @@ task overview(s, ok, err)
     try
         set d["employer"] to v.me()
         set d["employer_short"] to short(d["employer"])
-        set d["eth"] to nice(v.from_units(text(eth_balance(c["rpc"], d["employer"])), 18))
+        set d["eth"] to nice(v.from_units(text(evm_balance(c["rpc"], d["employer"])), 18))
         set d["token_balance"] to human(c, v.token_balance_of(c, d["token"], d["employer"]))
     recover e
         set d["note"] to "the stack does not answer: " + text(e)

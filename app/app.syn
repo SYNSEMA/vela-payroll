@@ -276,8 +276,8 @@ task run_payroll(state, sender, items, period)
 task run_payroll_salted(state, sender, items, period, salt)
     give process({"app_id": 1, "sender": sender, "request_type": 1, "kind": "process", "payload": private({"type": "payrun", "period": period, "items": items, "salt": salt}, "app"), "payload_hex": nothing, "state": private(state, "app")})
 
--- Maps are shared by reference and a successful call mutates the state it was given: snapshot
--- `before` with a deep copy when a test needs both sides of a transition.
+-- Maps are values since v0.6.29: a call never changes the state it was given, so `before` is safe
+-- as it is. The deep copy stays as a snapshot that does not depend on that guarantee.
 task copy(v)
     give json_decode(json_encode(v))
 
