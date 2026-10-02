@@ -5,7 +5,7 @@
 
 name = "Private payroll"
 slug = "vela-payroll"
-version = "0.2.6"
+version = "0.2.7"
 kind = "web"
 entry = "web.syn"
 engine = "0.6"
